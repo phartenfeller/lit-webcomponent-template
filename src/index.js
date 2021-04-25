@@ -1,10 +1,4 @@
-const {
-  LitElement,
-  html,
-  customElement,
-  property,
-  css,
-} = require('lit-element');
+import { css, customElement, html, LitElement, property } from 'lit-element';
 
 @customElement('my-component')
 class MyComponent extends LitElement {
