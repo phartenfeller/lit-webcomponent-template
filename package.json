@@ -1,5 +1,11 @@
 {
   "devDependencies": {
+    "@babel/core": "^7.13.16",
+    "@babel/eslint-parser": "^7.13.14",
+    "@babel/plugin-proposal-class-properties": "^7.13.0",
+    "@babel/plugin-proposal-decorators": "^7.13.15",
+    "@babel/preset-env": "^7.13.15",
+    "babel-loader": "^8.2.2",
     "eslint": "^7.23.0",
     "eslint-config-airbnb-base": "^14.2.1",
     "eslint-config-prettier": "^8.1.0",
@@ -18,5 +24,8 @@
     "build": "npm-run-all build-demo build-prod",
     "build-demo": "npx webpack-cli --mode=development --config webpack.dev.js",
     "build-prod": "npx webpack-cli --mode=production --config webpack.prod.js"
+  },
+  "dependencies": {
+    "lit": "^2.0.0-rc.1"
   }
 }

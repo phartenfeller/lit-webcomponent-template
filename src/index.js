@@ -1,21 +1,27 @@
-const template = document.createElement('template');
-template.innerHTML = `
-  <style>
-  </style>
-  <span class="change-me"></span>
-`;
+const {
+  LitElement,
+  html,
+  customElement,
+  property,
+  css,
+} = require('lit-element');
 
-class MyComponent extends HTMLElement {
-  constructor() {
-    super();
-    this.attachShadow({ mode: 'open' });
-    this.shadowRoot.appendChild(template.content.cloneNode(true));
+@customElement('my-component')
+class MyComponent extends LitElement {
+  @property()
+  text = 'Change Me';
+
+  static get styles() {
+    return css`
+      .my-class {
+        color: red;
+      }
+    `;
   }
 
-  connectedCallback() {
-    this.text = this.getAttribute('text');
-    this.shadowRoot.querySelector('.change-me').innerHTML = this.text;
+  render() {
+    return html`<span class="my-class">${this.text}</span>`;
   }
 }
 
-window.customElements.define('my-component', MyComponent);
+export default MyComponent;
