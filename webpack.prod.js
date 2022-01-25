@@ -1,11 +1,18 @@
 const path = require('path');
 const TerserPlugin = require('terser-webpack-plugin');
+const HtmlWebpackPlugin = require('html-webpack-plugin');
 
 module.exports = {
   entry: {
     index: path.resolve(__dirname, 'src', 'index.js'),
     'index.min': path.resolve(__dirname, 'src', 'index.js'),
   },
+  plugins: [
+    new HtmlWebpackPlugin({
+      filename: 'index.html',
+      template: 'index.html',
+    }),
+  ],
   optimization: {
     minimize: true,
     minimizer: [new TerserPlugin({ test: /\.min\.js$/ })],

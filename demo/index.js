@@ -30,8 +30,18 @@ const supportsAdoptingStyleSheets = window.ShadowRoot &&
     'adoptedStyleSheets' in Document.prototype &&
     'replace' in CSSStyleSheet.prototype;
 const constructionToken = Symbol();
+const styleSheetCache = new Map();
+/**
+ * A container for a string of CSS text, that may be used to create a CSSStyleSheet.
+ *
+ * CSSResult is the return value of `css`-tagged template literals and
+ * `unsafeCSS()`. In order to ensure that CSSResults are only created via the
+ * `css` tag and `unsafeCSS()`, CSSResult cannot be constructed directly.
+ */
 class CSSResult {
     constructor(cssText, safeToken) {
+        // This property needs to remain unminified.
+        this['_$cssResult$'] = true;
         if (safeToken !== constructionToken) {
             throw new Error('CSSResult is not constructable. Use `unsafeCSS` or `css` instead.');
         }
@@ -42,16 +52,31 @@ class CSSResult {
     get styleSheet() {
         // Note, if `supportsAdoptingStyleSheets` is true then we assume
         // CSSStyleSheet is constructable.
-        if (supportsAdoptingStyleSheets && this._styleSheet === undefined) {
-            this._styleSheet = new CSSStyleSheet();
-            this._styleSheet.replaceSync(this.cssText);
+        let styleSheet = styleSheetCache.get(this.cssText);
+        if (supportsAdoptingStyleSheets && styleSheet === undefined) {
+            styleSheetCache.set(this.cssText, (styleSheet = new CSSStyleSheet()));
+            styleSheet.replaceSync(this.cssText);
         }
-        return this._styleSheet;
+        return styleSheet;
     }
     toString() {
         return this.cssText;
     }
 }
+const textFromCSSResult = (value) => {
+    // This property needs to remain unminified.
+    if (value['_$cssResult$'] === true) {
+        return value.cssText;
+    }
+    else if (typeof value === 'number') {
+        return value;
+    }
+    else {
+        throw new Error(`Value passed to 'css' function must be a 'css' function result: ` +
+            `${value}. Use 'unsafeCSS' to pass non-literal values, but take care ` +
+            `to ensure page security.`);
+    }
+};
 /**
  * Wrap a value for interpolation in a [[`css`]] tagged template literal.
  *
@@ -59,35 +84,20 @@ class CSSResult {
  * or exfiltrate data to an attacker controlled site. Take care to only use
  * this with trusted input.
  */
-const unsafeCSS = (value) => {
-    return new CSSResult(String(value), constructionToken);
-};
-const textFromCSSResult = (value) => {
-    if (value instanceof CSSResult) {
-        return value.cssText;
-    }
-    else if (typeof value === 'number') {
-        return value;
-    }
-    else {
-        throw new Error(`Value passed to 'css' function must be a 'css' function result: ${value}. Use 'unsafeCSS' to pass non-literal values, but
-            take care to ensure page security.`);
-    }
-};
-const cssResultCache = new Map();
+const unsafeCSS = (value) => new CSSResult(typeof value === 'string' ? value : String(value), constructionToken);
 /**
- * Template tag which which can be used with LitElement's [[LitElement.styles |
- * `styles`]] property to set element styles. For security reasons, only literal
- * string values may be used. To incorporate non-literal values [[`unsafeCSS`]]
- * may be used inside a template string part.
+ * A template literal tag which can be used with LitElement's
+ * [[LitElement.styles | `styles`]] property to set element styles.
+ *
+ * For security reasons, only literal string values and number may be used in
+ * embedded expressions. To incorporate non-literal values [[`unsafeCSS`]] may
+ * be used inside an expression.
  */
 const css = (strings, ...values) => {
-    const cssText = values.reduce((acc, v, idx) => acc + textFromCSSResult(v) + strings[idx + 1], strings[0]);
-    let result = cssResultCache.get(cssText);
-    if (result === undefined) {
-        cssResultCache.set(cssText, (result = new CSSResult(cssText, constructionToken)));
-    }
-    return result;
+    const cssText = strings.length === 1
+        ? strings[0]
+        : values.reduce((acc, v, idx) => acc + textFromCSSResult(v) + strings[idx + 1], strings[0]);
+    return new CSSResult(cssText, constructionToken);
 };
 /**
  * Applies the given styles to a `shadowRoot`. When Shadow DOM is
@@ -105,6 +115,11 @@ const adoptStyles = (renderRoot, styles) => {
     else {
         styles.forEach((s) => {
             const style = document.createElement('style');
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const nonce = window['litNonce'];
+            if (nonce !== undefined) {
+                style.setAttribute('nonce', nonce);
+            }
             style.textContent = s.cssText;
             renderRoot.appendChild(style);
         });
@@ -181,9 +196,9 @@ const decorateProperty = ({ finisher, descriptor, }) => (protoOrDescriptor, name
     else {
         // Note, the @property decorator saves `key` as `originalKey`
         // so try to use it here.
-        const key = (_a = 
+        const key = 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        protoOrDescriptor.originalKey) !== null && _a !== void 0 ? _a : protoOrDescriptor.key;
+        (_a = protoOrDescriptor.originalKey) !== null && _a !== void 0 ? _a : protoOrDescriptor.key;
         const info = descriptor != undefined
             ? {
                 kind: 'method',
@@ -243,7 +258,7 @@ const standardCustomElement = (tagName, descriptor) => {
 /**
  * Class decorator factory that defines the decorated class as a custom element.
  *
- * ```
+ * ```js
  * @customElement('my-element')
  * class MyElement extends LitElement {
  *   render() {
@@ -288,7 +303,6 @@ __webpack_require__.r(__webpack_exports__);
  * Current browsers support the `capture`, `passive`, and `once` options. See:
  * https://developer.mozilla.org/en-US/docs/Web/API/EventTarget/addEventListener#Parameters
  *
- * @example
  * ```ts
  * class MyElement {
  *   clicked = false;
@@ -406,7 +420,6 @@ const legacyProperty = (options, proto, name) => {
  * state properties can be initialized via public properties to facilitate
  * complex interactions.
  *
- * @example
  * ```ts
  * class MyElement {
  *   @property({ type: Boolean })
@@ -452,7 +465,6 @@ __webpack_require__.r(__webpack_exports__);
  * See:
  * https://developer.mozilla.org/en-US/docs/Web/API/Document/querySelectorAll
  *
- * @example
  * ```ts
  * class MyElement {
  *   @queryAll('div')
@@ -472,8 +484,8 @@ function queryAll(selector) {
     return (0,_base_js__WEBPACK_IMPORTED_MODULE_0__.decorateProperty)({
         descriptor: (_name) => ({
             get() {
-                var _a;
-                return (_a = this.renderRoot) === null || _a === void 0 ? void 0 : _a.querySelectorAll(selector);
+                var _a, _b;
+                return (_b = (_a = this.renderRoot) === null || _a === void 0 ? void 0 : _a.querySelectorAll(selector)) !== null && _b !== void 0 ? _b : [];
             },
             enumerable: true,
             configurable: true,
@@ -481,6 +493,90 @@ function queryAll(selector) {
     });
 }
 //# sourceMappingURL=query-all.js.map
+
+/***/ }),
+
+/***/ "./node_modules/@lit/reactive-element/development/decorators/query-assigned-elements.js":
+/*!**********************************************************************************************!*\
+  !*** ./node_modules/@lit/reactive-element/development/decorators/query-assigned-elements.js ***!
+  \**********************************************************************************************/
+/***/ ((__unused_webpack___webpack_module__, __webpack_exports__, __webpack_require__) => {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   "queryAssignedElements": () => (/* binding */ queryAssignedElements)
+/* harmony export */ });
+/* harmony import */ var _base_js__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./base.js */ "./node_modules/@lit/reactive-element/development/decorators/base.js");
+/**
+ * @license
+ * Copyright 2021 Google LLC
+ * SPDX-License-Identifier: BSD-3-Clause
+ */
+var _a;
+/*
+ * IMPORTANT: For compatibility with tsickle and the Closure JS compiler, all
+ * property decorators (but not class decorators) in this file that have
+ * an @ExportDecoratedItems annotation must be defined as a regular function,
+ * not an arrow function.
+ */
+
+/**
+ * A tiny module scoped polyfill for HTMLSlotElement.assignedElements.
+ */
+const slotAssignedElements = ((_a = window.HTMLSlotElement) === null || _a === void 0 ? void 0 : _a.prototype.assignedElements) != null
+    ? (slot, opts) => slot.assignedElements(opts)
+    : (slot, opts) => slot
+        .assignedNodes(opts)
+        .filter((node) => node.nodeType === Node.ELEMENT_NODE);
+/**
+ * A property decorator that converts a class property into a getter that
+ * returns the `assignedElements` of the given `slot`. Provides a declarative
+ * way to use
+ * [`slot.assignedElements`](https://developer.mozilla.org/en-US/docs/Web/API/HTMLSlotElement/assignedElements).
+ *
+ * Can be passed an optional [[`QueryAssignedElementsOptions`]] object.
+ *
+ * Example usage:
+ * ```ts
+ * class MyElement {
+ *   @queryAssignedElements({ slot: 'list' })
+ *   listItems!: Array<HTMLElement>;
+ *   @queryAssignedElements()
+ *   unnamedSlotEls!: Array<HTMLElement>;
+ *
+ *   render() {
+ *     return html`
+ *       <slot name="list"></slot>
+ *       <slot></slot>
+ *     `;
+ *   }
+ * }
+ * ```
+ *
+ * Note, the type of this property should be annotated as `Array<HTMLElement>`.
+ *
+ * @category Decorator
+ */
+function queryAssignedElements(options) {
+    const { slot, selector } = options !== null && options !== void 0 ? options : {};
+    return (0,_base_js__WEBPACK_IMPORTED_MODULE_0__.decorateProperty)({
+        descriptor: (_name) => ({
+            get() {
+                var _a;
+                const slotSelector = `slot${slot ? `[name=${slot}]` : ':not([name])'}`;
+                const slotEl = (_a = this.renderRoot) === null || _a === void 0 ? void 0 : _a.querySelector(slotSelector);
+                const elements = slotEl != null ? slotAssignedElements(slotEl, options) : [];
+                if (selector) {
+                    return elements.filter((node) => node.matches(selector));
+                }
+                return elements;
+            },
+            enumerable: true,
+            configurable: true,
+        }),
+    });
+}
+//# sourceMappingURL=query-assigned-elements.js.map
 
 /***/ }),
 
@@ -495,60 +591,47 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   "queryAssignedNodes": () => (/* binding */ queryAssignedNodes)
 /* harmony export */ });
 /* harmony import */ var _base_js__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./base.js */ "./node_modules/@lit/reactive-element/development/decorators/base.js");
+/* harmony import */ var _query_assigned_elements_js__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./query-assigned-elements.js */ "./node_modules/@lit/reactive-element/development/decorators/query-assigned-elements.js");
 /**
  * @license
  * Copyright 2017 Google LLC
  * SPDX-License-Identifier: BSD-3-Clause
  */
-
-// TODO(sorvell): Remove when https://github.com/webcomponents/polyfills/issues/397 is addressed.
-// x-browser support for matches
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const ElementProto = Element.prototype;
-const legacyMatches = ElementProto.msMatchesSelector || ElementProto.webkitMatchesSelector;
-/**
- * A property decorator that converts a class property into a getter that
- * returns the `assignedNodes` of the given named `slot`. Note, the type of
- * this property should be annotated as `NodeListOf<HTMLElement>`.
- *
- * @param slotName A string name of the slot.
- * @param flatten A boolean which when true flattens the assigned nodes,
- *     meaning any assigned nodes that are slot elements are replaced with their
- *     assigned nodes.
- * @param selector A string which filters the results to elements that match
- *     the given css selector.
- *
- * * @example
- * ```ts
- * class MyElement {
- *   @queryAssignedNodes('list', true, '.item')
- *   listItems;
- *
- *   render() {
- *     return html`
- *       <slot name="list"></slot>
- *     `;
- *   }
- * }
- * ```
- * @category Decorator
+/*
+ * IMPORTANT: For compatibility with tsickle and the Closure JS compiler, all
+ * property decorators (but not class decorators) in this file that have
+ * an @ExportDecoratedItems annotation must be defined as a regular function,
+ * not an arrow function.
  */
-function queryAssignedNodes(slotName = '', flatten = false, selector = '') {
+
+
+function queryAssignedNodes(slotOrOptions, flatten, selector) {
+    // Normalize the overloaded arguments.
+    let slot = slotOrOptions;
+    let assignedNodesOptions;
+    if (typeof slotOrOptions === 'object') {
+        slot = slotOrOptions.slot;
+        assignedNodesOptions = slotOrOptions;
+    }
+    else {
+        assignedNodesOptions = { flatten };
+    }
+    // For backwards compatibility, queryAssignedNodes with a selector behaves
+    // exactly like queryAssignedElements with a selector.
+    if (selector) {
+        return (0,_query_assigned_elements_js__WEBPACK_IMPORTED_MODULE_1__.queryAssignedElements)({
+            slot: slot,
+            flatten,
+            selector,
+        });
+    }
     return (0,_base_js__WEBPACK_IMPORTED_MODULE_0__.decorateProperty)({
         descriptor: (_name) => ({
             get() {
                 var _a, _b;
-                const slotSelector = `slot${slotName ? `[name=${slotName}]` : ':not([name])'}`;
-                const slot = (_a = this.renderRoot) === null || _a === void 0 ? void 0 : _a.querySelector(slotSelector);
-                let nodes = (_b = slot) === null || _b === void 0 ? void 0 : _b.assignedNodes({ flatten });
-                if (nodes && selector) {
-                    nodes = nodes.filter((node) => node.nodeType === Node.ELEMENT_NODE &&
-                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                        (node.matches
-                            ? node.matches(selector)
-                            : legacyMatches.call(node, selector)));
-                }
-                return nodes;
+                const slotSelector = `slot${slot ? `[name=${slot}]` : ':not([name])'}`;
+                const slotEl = (_a = this.renderRoot) === null || _a === void 0 ? void 0 : _a.querySelector(slotSelector);
+                return (_b = slotEl === null || slotEl === void 0 ? void 0 : slotEl.assignedNodes(assignedNodesOptions)) !== null && _b !== void 0 ? _b : [];
             },
             enumerable: true,
             configurable: true,
@@ -593,7 +676,6 @@ __webpack_require__.r(__webpack_exports__);
  *
  * See: https://developer.mozilla.org/en-US/docs/Web/API/Document/querySelector
  *
- * @example
  * ```ts
  * class MyElement {
  *   @queryAsync('#first')
@@ -658,8 +740,6 @@ __webpack_require__.r(__webpack_exports__);
  *
  * See: https://developer.mozilla.org/en-US/docs/Web/API/Document/querySelector
  *
- * @example
- *
  * ```ts
  * class MyElement {
  *   @query('#first')
@@ -680,8 +760,8 @@ function query(selector, cache) {
         descriptor: (name) => {
             const descriptor = {
                 get() {
-                    var _a;
-                    return (_a = this.renderRoot) === null || _a === void 0 ? void 0 : _a.querySelector(selector);
+                    var _a, _b;
+                    return (_b = (_a = this.renderRoot) === null || _a === void 0 ? void 0 : _a.querySelector(selector)) !== null && _b !== void 0 ? _b : null;
                 },
                 enumerable: true,
                 configurable: true,
@@ -689,9 +769,9 @@ function query(selector, cache) {
             if (cache) {
                 const key = typeof name === 'symbol' ? Symbol() : `__${name}`;
                 descriptor.get = function () {
-                    var _a;
+                    var _a, _b;
                     if (this[key] === undefined) {
-                        this[key] = (_a = this.renderRoot) === null || _a === void 0 ? void 0 : _a.querySelector(selector);
+                        this[key] = (_b = (_a = this.renderRoot) === null || _a === void 0 ? void 0 : _a.querySelector(selector)) !== null && _b !== void 0 ? _b : null;
                     }
                     return this[key];
                 };
@@ -741,7 +821,6 @@ function state(options) {
     return (0,_property_js__WEBPACK_IMPORTED_MODULE_0__.property)({
         ...options,
         state: true,
-        attribute: false,
     });
 }
 //# sourceMappingURL=state.js.map
@@ -772,9 +851,8 @@ __webpack_require__.r(__webpack_exports__);
  * Copyright 2017 Google LLC
  * SPDX-License-Identifier: BSD-3-Clause
  */
-var _a, _b, _c, _d;
-var _e;
-var _f;
+var _a, _b, _c;
+var _d;
 /**
  * Use this module if you want to create your own base class extending
  * [[ReactiveElement]].
@@ -784,25 +862,46 @@ var _f;
 
 const DEV_MODE = true;
 let requestUpdateThenable;
+let issueWarning;
+const trustedTypes = window
+    .trustedTypes;
+// Temporary workaround for https://crbug.com/993268
+// Currently, any attribute starting with "on" is considered to be a
+// TrustedScript source. Such boolean attributes must be set to the equivalent
+// trusted emptyScript value.
+const emptyStringForBooleanAttribute = trustedTypes
+    ? trustedTypes.emptyScript
+    : '';
+const polyfillSupport = DEV_MODE
+    ? window.reactiveElementPolyfillSupportDevMode
+    : window.reactiveElementPolyfillSupport;
 if (DEV_MODE) {
-    // TODO(sorvell): Add a link to the docs about using dev v. production mode.
-    console.warn(`Running in dev mode. Do not use in production!`);
-    // Issue platform support warning.
-    if (((_a = window.ShadyDOM) === null || _a === void 0 ? void 0 : _a.inUse) &&
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        globalThis['reactiveElementPlatformSupport'] === undefined) {
-        console.warn(`Shadow DOM is being polyfilled via ShadyDOM but ` +
+    // Ensure warnings are issued only 1x, even if multiple versions of Lit
+    // are loaded.
+    const issuedWarnings = ((_a = globalThis.litIssuedWarnings) !== null && _a !== void 0 ? _a : (globalThis.litIssuedWarnings = new Set()));
+    // Issue a warning, if we haven't already.
+    issueWarning = (code, warning) => {
+        warning += ` See https://lit.dev/msg/${code} for more information.`;
+        if (!issuedWarnings.has(warning)) {
+            console.warn(warning);
+            issuedWarnings.add(warning);
+        }
+    };
+    issueWarning('dev-mode', `Lit is in dev mode. Not recommended for production!`);
+    // Issue polyfill support warning.
+    if (((_b = window.ShadyDOM) === null || _b === void 0 ? void 0 : _b.inUse) && polyfillSupport === undefined) {
+        issueWarning('polyfill-support-missing', `Shadow DOM is being polyfilled via \`ShadyDOM\` but ` +
             `the \`polyfill-support\` module has not been loaded.`);
     }
-    requestUpdateThenable = {
+    requestUpdateThenable = (name) => ({
         then: (onfulfilled, _onrejected) => {
-            console.warn(`\`requestUpdate\` no longer returns a Promise.` +
-                `Use \`updateComplete\` instead.`);
+            issueWarning('request-update-promise', `The \`requestUpdate\` method should no longer return a Promise but ` +
+                `does so on \`${name}\`. Use \`updateComplete\` instead.`);
             if (onfulfilled !== undefined) {
                 onfulfilled(false);
             }
         },
-    };
+    });
 }
 /*
  * When using Closure Compiler, JSCompiler_renameProperty(property, object) is
@@ -816,7 +915,7 @@ const defaultConverter = {
     toAttribute(value, type) {
         switch (type) {
             case Boolean:
-                value = value ? '' : null;
+                value = value ? emptyStringForBooleanAttribute : null;
                 break;
             case Object:
             case Array:
@@ -885,13 +984,15 @@ class ReactiveElement extends HTMLElement {
     constructor() {
         super();
         this.__instanceProperties = new Map();
-        this.__pendingConnectionPromise = undefined;
-        this.__enableConnection = undefined;
         /**
+         * True if there is a pending update as a result of calling `requestUpdate()`.
+         * Should only be read.
          * @category updates
          */
         this.isUpdatePending = false;
         /**
+         * Is set to `true` after the first update. The element code cannot assume
+         * that `renderRoot` exists before the element `hasUpdated`.
          * @category updates
          */
         this.hasUpdated = false;
@@ -902,6 +1003,36 @@ class ReactiveElement extends HTMLElement {
         this._initialize();
     }
     /**
+     * Adds an initializer function to the class that is called during instance
+     * construction.
+     *
+     * This is useful for code that runs against a `ReactiveElement`
+     * subclass, such as a decorator, that needs to do work for each
+     * instance, such as setting up a `ReactiveController`.
+     *
+     * ```ts
+     * const myDecorator = (target: typeof ReactiveElement, key: string) => {
+     *   target.addInitializer((instance: ReactiveElement) => {
+     *     // This is run during construction of the element
+     *     new MyController(instance);
+     *   });
+     * }
+     * ```
+     *
+     * Decorating a field will then cause each instance to run an initializer
+     * that adds a controller:
+     *
+     * ```ts
+     * class MyElement extends LitElement {
+     *   @myDecorator foo;
+     * }
+     * ```
+     *
+     * Initializers are stored per-constructor. Adding an initializer to a
+     * subclass does not add it to a superclass. Since initializers are run in
+     * constructors, initializers will run in order of the class hierarchy,
+     * starting with superclasses and progressing to the instance's class.
+     *
      * @nocollapse
      */
     static addInitializer(initializer) {
@@ -931,7 +1062,7 @@ class ReactiveElement extends HTMLElement {
     }
     /**
      * Creates a property accessor on the element prototype if one does not exist
-     * and stores a PropertyDeclaration for the property with the given options.
+     * and stores a `PropertyDeclaration` for the property with the given options.
      * The property setter calls the property's `hasChanged` property option
      * or uses a strict identity check to determine whether or not to request
      * an update.
@@ -944,15 +1075,18 @@ class ReactiveElement extends HTMLElement {
      * `getPropertyDescriptor`. To customize the options for a property,
      * implement `createProperty` like this:
      *
+     * ```ts
      * static createProperty(name, options) {
      *   options = Object.assign(options, {myOption: true});
      *   super.createProperty(name, options);
      * }
+     * ```
      *
      * @nocollapse
      * @category properties
      */
     static createProperty(name, options = defaultPropertyDeclaration) {
+        var _a;
         // if this is a state property, force the attribute to false.
         if (options.state) {
             // Cast as any since this is readonly.
@@ -973,6 +1107,14 @@ class ReactiveElement extends HTMLElement {
             const descriptor = this.getPropertyDescriptor(name, key, options);
             if (descriptor !== undefined) {
                 Object.defineProperty(this.prototype, name, descriptor);
+                if (DEV_MODE) {
+                    // If this class doesn't have its own set, create one and initialize
+                    // with the values in the set from the nearest ancestor class, if any.
+                    if (!this.hasOwnProperty('__reactivePropertyKeys')) {
+                        this.__reactivePropertyKeys = new Set((_a = this.__reactivePropertyKeys) !== null && _a !== void 0 ? _a : []);
+                    }
+                    this.__reactivePropertyKeys.add(name);
+                }
             }
         }
     }
@@ -981,22 +1123,24 @@ class ReactiveElement extends HTMLElement {
      * If no descriptor is returned, the property will not become an accessor.
      * For example,
      *
-     *   class MyElement extends LitElement {
-     *     static getPropertyDescriptor(name, key, options) {
-     *       const defaultDescriptor =
-     *           super.getPropertyDescriptor(name, key, options);
-     *       const setter = defaultDescriptor.set;
-     *       return {
-     *         get: defaultDescriptor.get,
-     *         set(value) {
-     *           setter.call(this, value);
-     *           // custom action.
-     *         },
-     *         configurable: true,
-     *         enumerable: true
-     *       }
+     * ```ts
+     * class MyElement extends LitElement {
+     *   static getPropertyDescriptor(name, key, options) {
+     *     const defaultDescriptor =
+     *         super.getPropertyDescriptor(name, key, options);
+     *     const setter = defaultDescriptor.set;
+     *     return {
+     *       get: defaultDescriptor.get,
+     *       set(value) {
+     *         setter.call(this, value);
+     *         // custom action.
+     *       },
+     *       configurable: true,
+     *       enumerable: true
      *     }
      *   }
+     * }
+     * ```
      *
      * @nocollapse
      * @category properties
@@ -1018,12 +1162,12 @@ class ReactiveElement extends HTMLElement {
     }
     /**
      * Returns the property options associated with the given property.
-     * These options are defined with a PropertyDeclaration via the `properties`
+     * These options are defined with a `PropertyDeclaration` via the `properties`
      * object or the `@property` decorator and are registered in
      * `createProperty(...)`.
      *
      * Note, this method should be considered "final" and not overridden. To
-     * customize the options for a given property, override `createProperty`.
+     * customize the options for a given property, override [[`createProperty`]].
      *
      * @nocollapse
      * @final
@@ -1071,17 +1215,16 @@ class ReactiveElement extends HTMLElement {
         this.elementStyles = this.finalizeStyles(this.styles);
         // DEV mode warnings
         if (DEV_MODE) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const warnRemoved = (obj, name) => {
-                if (obj[name] !== undefined) {
-                    console.warn(`\`${name}\` is implemented. It ` +
-                        `has been removed from this version of ReactiveElement.` +
-                        ` See the changelog at https://github.com/Polymer/lit-html/blob/main/packages/reactive-element/CHANGELOG.md`);
+            const warnRemovedOrRenamed = (name, renamed = false) => {
+                if (this.prototype.hasOwnProperty(name)) {
+                    issueWarning(renamed ? 'renamed-api' : 'removed-api', `\`${name}\` is implemented on class ${this.name}. It ` +
+                        `has been ${renamed ? 'renamed' : 'removed'} ` +
+                        `in this version of LitElement.`);
                 }
             };
-            [`initialize`, `requestUpdateInternal`, `_getUpdateComplete`].forEach((name) => 
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            warnRemoved(this.prototype, name));
+            warnRemovedOrRenamed('initialize');
+            warnRemovedOrRenamed('requestUpdateInternal');
+            warnRemovedOrRenamed('_getUpdateComplete', true);
         }
         return true;
     }
@@ -1103,7 +1246,7 @@ class ReactiveElement extends HTMLElement {
         const elementStyles = [];
         if (Array.isArray(styles)) {
             // Dedupe the flattened array in reverse order to preserve the last items.
-            // TODO(sorvell): casting to Array<unknown> works around TS error that
+            // Casting to Array<unknown> works around TS error that
             // appears to come from trying to flatten a type CSSResultArray.
             const set = new Set(styles.flat(Infinity).reverse());
             // Then preserve original order by adding the set items in reverse order.
@@ -1147,6 +1290,12 @@ class ReactiveElement extends HTMLElement {
         (_a = this.constructor._initializers) === null || _a === void 0 ? void 0 : _a.forEach((i) => i(this));
     }
     /**
+     * Registers a `ReactiveController` to participate in the element's reactive
+     * update cycle. The element automatically calls into any registered
+     * controllers during its lifecycle callbacks.
+     *
+     * If the element is connected when `addController()` is called, the
+     * controller's `hostConnected()` callback will be immediately called.
      * @category controllers
      */
     addController(controller) {
@@ -1161,6 +1310,7 @@ class ReactiveElement extends HTMLElement {
         }
     }
     /**
+     * Removes a `ReactiveController` from the element.
      * @category controllers
      */
     removeController(controller) {
@@ -1219,12 +1369,6 @@ class ReactiveElement extends HTMLElement {
         }
         this.enableUpdating(true);
         (_a = this.__controllers) === null || _a === void 0 ? void 0 : _a.forEach((c) => { var _a; return (_a = c.hostConnected) === null || _a === void 0 ? void 0 : _a.call(c); });
-        // If we were disconnected, re-enable updating by resolving the pending
-        // connection promise
-        if (this.__enableConnection) {
-            this.__enableConnection();
-            this.__pendingConnectionPromise = this.__enableConnection = undefined;
-        }
     }
     /**
      * Note, this method should be considered final and not overridden. It is
@@ -1242,7 +1386,6 @@ class ReactiveElement extends HTMLElement {
     disconnectedCallback() {
         var _a;
         (_a = this.__controllers) === null || _a === void 0 ? void 0 : _a.forEach((c) => { var _a; return (_a = c.hostDisconnected) === null || _a === void 0 ? void 0 : _a.call(c); });
-        this.__pendingConnectionPromise = new Promise((r) => (this.__enableConnection = r));
     }
     /**
      * Synchronizes property values when attributes change.
@@ -1253,18 +1396,17 @@ class ReactiveElement extends HTMLElement {
     }
     __propertyToAttribute(name, value, options = defaultPropertyDeclaration) {
         var _a, _b;
-        const attr = this
-            .constructor.__attributeNameForProperty(name, options);
+        const attr = this.constructor.__attributeNameForProperty(name, options);
         if (attr !== undefined && options.reflect === true) {
             const toAttribute = (_b = (_a = options.converter) === null || _a === void 0 ? void 0 : _a.toAttribute) !== null && _b !== void 0 ? _b : defaultConverter.toAttribute;
             const attrValue = toAttribute(value, options.type);
             if (DEV_MODE &&
                 this.constructor.enabledWarnings.indexOf('migration') >= 0 &&
                 attrValue === undefined) {
-                console.warn(`The attribute value for the ` +
-                    `${name} property is undefined. The attribute will be ` +
-                    `removed, but in the previous version of ReactiveElement, the ` +
-                    `attribute would not have changed.`);
+                issueWarning('undefined-attribute-value', `The attribute value for the ${name} property is ` +
+                    `undefined on element ${this.localName}. The attribute will be ` +
+                    `removed, but in the previous version of \`ReactiveElement\`, ` +
+                    `the attribute would not have changed.`);
             }
             // Track if the property is being reflected to avoid
             // setting the property again via `attributeChangedCallback`. Note:
@@ -1355,7 +1497,9 @@ class ReactiveElement extends HTMLElement {
         }
         // Note, since this no longer returns a promise, in dev mode we return a
         // thenable which warns if it's called.
-        return DEV_MODE ? requestUpdateThenable : undefined;
+        return DEV_MODE
+            ? requestUpdateThenable(this.localName)
+            : undefined;
     }
     /**
      * Sets up the element to asynchronously update.
@@ -1366,10 +1510,6 @@ class ReactiveElement extends HTMLElement {
             // Ensure any previous update has resolved before updating.
             // This `await` also ensures that property changes are batched.
             await this.__updatePromise;
-            // If we were disconnected, wait until re-connected to flush an update
-            while (this.__pendingConnectionPromise) {
-                await this.__pendingConnectionPromise;
-            }
         }
         catch (e) {
             // Refire any previous errors async so they do not disrupt the update
@@ -1378,8 +1518,8 @@ class ReactiveElement extends HTMLElement {
             // `window.onunhandledrejection`.
             Promise.reject(e);
         }
-        const result = this.performUpdate();
-        // If `performUpdate` returns a Promise, we await it. This is done to
+        const result = this.scheduleUpdate();
+        // If `scheduleUpdate` returns a Promise, we await it. This is done to
         // enable coordinating updates with a scheduler. Note, the result is
         // checked to avoid delaying an additional microtask unless we need to.
         if (result != null) {
@@ -1388,24 +1528,44 @@ class ReactiveElement extends HTMLElement {
         return !this.isUpdatePending;
     }
     /**
-     * Performs an element update. Note, if an exception is thrown during the
-     * update, `firstUpdated` and `updated` will not be called.
-     *
-     * You can override this method to change the timing of updates. If this
-     * method is overridden, `super.performUpdate()` must be called.
+     * Schedules an element update. You can override this method to change the
+     * timing of updates by returning a Promise. The update will await the
+     * returned Promise, and you should resolve the Promise to allow the update
+     * to proceed. If this method is overridden, `super.scheduleUpdate()`
+     * must be called.
      *
      * For instance, to schedule updates to occur just before the next frame:
      *
-     * ```
-     * protected async performUpdate(): Promise<unknown> {
+     * ```ts
+     * override protected async scheduleUpdate(): Promise<unknown> {
      *   await new Promise((resolve) => requestAnimationFrame(() => resolve()));
-     *   super.performUpdate();
+     *   super.scheduleUpdate();
      * }
      * ```
      * @category updates
      */
+    scheduleUpdate() {
+        return this.performUpdate();
+    }
+    /**
+     * Performs an element update. Note, if an exception is thrown during the
+     * update, `firstUpdated` and `updated` will not be called.
+     *
+     * Call `performUpdate()` to immediately process a pending update. This should
+     * generally not be needed, but it can be done in rare cases when you need to
+     * update synchronously.
+     *
+     * Note: To ensure `performUpdate()` synchronously completes a pending update,
+     * it should not be overridden. In LitElement 2.x it was suggested to override
+     * `performUpdate()` to also customizing update scheduling. Instead, you should now
+     * override `scheduleUpdate()`. For backwards compatibility with LitElement 2.x,
+     * scheduling updates via `performUpdate()` continues to work, but will make
+     * also calling `performUpdate()` to synchronously process updates difficult.
+     *
+     * @category updates
+     */
     performUpdate() {
-        var _a;
+        var _a, _b;
         // Abort any update if one is not pending when this is called.
         // This can happen if `performUpdate` is called early to "flush"
         // the update.
@@ -1417,22 +1577,20 @@ class ReactiveElement extends HTMLElement {
             // Produce warning if any class properties are shadowed by class fields
             if (DEV_MODE) {
                 const shadowedProperties = [];
-                this.constructor.elementProperties.forEach((_v, p) => {
+                (_a = this.constructor.__reactivePropertyKeys) === null || _a === void 0 ? void 0 : _a.forEach((p) => {
                     var _a;
                     if (this.hasOwnProperty(p) && !((_a = this.__instanceProperties) === null || _a === void 0 ? void 0 : _a.has(p))) {
                         shadowedProperties.push(p);
                     }
                 });
                 if (shadowedProperties.length) {
-                    // TODO(sorvell): Link to docs explanation of this issue.
-                    console.warn(`The following properties will not trigger updates as expected ` +
-                        `because they are set using class fields: ` +
-                        `${shadowedProperties.join(', ')}. ` +
+                    throw new Error(`The following properties on element ${this.localName} will not ` +
+                        `trigger updates as expected because they are set using class ` +
+                        `fields: ${shadowedProperties.join(', ')}. ` +
                         `Native class fields and some compiled output will overwrite ` +
-                        `accessors used for detecting changes. To fix this issue, ` +
-                        `either initialize properties in the constructor or adjust ` +
-                        `your compiler settings; for example, for TypeScript set ` +
-                        `\`useDefineForClassFields: false\` in your \`tsconfig.json\`.`);
+                        `accessors used for detecting changes. See ` +
+                        `https://lit.dev/msg/class-field-shadowing ` +
+                        `for more information.`);
                 }
             }
         }
@@ -1450,7 +1608,7 @@ class ReactiveElement extends HTMLElement {
             shouldUpdate = this.shouldUpdate(changedProperties);
             if (shouldUpdate) {
                 this.willUpdate(changedProperties);
-                (_a = this.__controllers) === null || _a === void 0 ? void 0 : _a.forEach((c) => { var _a; return (_a = c.hostUpdate) === null || _a === void 0 ? void 0 : _a.call(c); });
+                (_b = this.__controllers) === null || _b === void 0 ? void 0 : _b.forEach((c) => { var _a; return (_a = c.hostUpdate) === null || _a === void 0 ? void 0 : _a.call(c); });
                 this.update(changedProperties);
             }
             else {
@@ -1487,7 +1645,8 @@ class ReactiveElement extends HTMLElement {
         if (DEV_MODE &&
             this.isUpdatePending &&
             this.constructor.enabledWarnings.indexOf('change-in-update') >= 0) {
-            console.warn(`An update was requested (generally because a property was set) ` +
+            issueWarning('change-in-update', `Element ${this.localName} scheduled an update ` +
+                `(generally because a property was set) ` +
                 `after an update completed, causing a new update to be scheduled. ` +
                 `This is inefficient and should be avoided unless the next update ` +
                 `can only be scheduled as a side effect of the previous update.`);
@@ -1509,7 +1668,7 @@ class ReactiveElement extends HTMLElement {
      * before fulfilling this Promise. To do this, first await
      * `super.getUpdateComplete()`, then any subsequent state.
      *
-     * @return A promise of a boolean that indicates if the update resolved
+     * @return A promise of a boolean that resolves to true if the update completed
      *     without triggering another update.
      * @category updates
      */
@@ -1525,19 +1684,25 @@ class ReactiveElement extends HTMLElement {
      * language is ES5 (https://github.com/microsoft/TypeScript/issues/338).
      * This method should be overridden instead. For example:
      *
-     *   class MyElement extends LitElement {
-     *     async getUpdateComplete() {
-     *       await super.getUpdateComplete();
-     *       await this._myChild.updateComplete;
-     *     }
+     * ```ts
+     * class MyElement extends LitElement {
+     *   override async getUpdateComplete() {
+     *     const result = await super.getUpdateComplete();
+     *     await this._myChild.updateComplete;
+     *     return result;
      *   }
+     * }
+     * ```
+     *
+     * @return A promise of a boolean that resolves to true if the update completed
+     *     without triggering another update.
      * @category updates
      */
     getUpdateComplete() {
         return this.__updatePromise;
     }
     /**
-     * Controls whether or not `update` should be called when the element requests
+     * Controls whether or not `update()` should be called when the element requests
      * an update. By default, this method always returns `true`, but this can be
      * customized to control when to update.
      *
@@ -1588,11 +1753,25 @@ class ReactiveElement extends HTMLElement {
      */
     firstUpdated(_changedProperties) { }
 }
-_f = finalized;
+_d = finalized;
 /**
  * Marks class as having finished creating properties.
  */
-ReactiveElement[_f] = true;
+ReactiveElement[_d] = true;
+/**
+ * Memoized list of all element properties, including any superclass properties.
+ * Created lazily on user subclasses when finalizing the class.
+ * @nocollapse
+ * @category properties
+ */
+ReactiveElement.elementProperties = new Map();
+/**
+ * Memoized list of all element styles.
+ * Created lazily on user subclasses when finalizing the class.
+ * @nocollapse
+ * @category styles
+ */
+ReactiveElement.elementStyles = [];
 /**
  * Options used when calling `attachShadow`. Set this property to customize
  * the options for the shadowRoot; for example, to create a closed
@@ -1605,8 +1784,7 @@ ReactiveElement[_f] = true;
  */
 ReactiveElement.shadowRootOptions = { mode: 'open' };
 // Apply polyfills if available
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-(_c = (_b = globalThis)['reactiveElementPlatformSupport']) === null || _c === void 0 ? void 0 : _c.call(_b, { ReactiveElement });
+polyfillSupport === null || polyfillSupport === void 0 ? void 0 : polyfillSupport({ ReactiveElement });
 // Dev mode warnings...
 if (DEV_MODE) {
     // Default warning set.
@@ -1632,9 +1810,11 @@ if (DEV_MODE) {
 }
 // IMPORTANT: do not change the property name or the assignment expression.
 // This line will be used in regexes to search for ReactiveElement usage.
-// TODO(justinfagnani): inject version number at build time
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-((_d = (_e = globalThis)['reactiveElementVersions']) !== null && _d !== void 0 ? _d : (_e['reactiveElementVersions'] = [])).push('1.0.0-rc.1');
+((_c = globalThis.reactiveElementVersions) !== null && _c !== void 0 ? _c : (globalThis.reactiveElementVersions = [])).push('1.2.0');
+if (DEV_MODE && globalThis.reactiveElementVersions.length > 1) {
+    issueWarning('multiple-versions', `Multiple versions of Lit loaded. Loading multiple versions ` +
+        `is not recommended.`);
+}
 //# sourceMappingURL=reactive-element.js.map
 
 /***/ }),
@@ -1656,7 +1836,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   "notEqual": () => (/* reexport safe */ _lit_reactive_element__WEBPACK_IMPORTED_MODULE_0__.notEqual),
 /* harmony export */   "supportsAdoptingStyleSheets": () => (/* reexport safe */ _lit_reactive_element__WEBPACK_IMPORTED_MODULE_0__.supportsAdoptingStyleSheets),
 /* harmony export */   "unsafeCSS": () => (/* reexport safe */ _lit_reactive_element__WEBPACK_IMPORTED_MODULE_0__.unsafeCSS),
-/* harmony export */   "_Σ": () => (/* reexport safe */ lit_html__WEBPACK_IMPORTED_MODULE_1__["_Σ"]),
+/* harmony export */   "INTERNAL": () => (/* reexport safe */ lit_html__WEBPACK_IMPORTED_MODULE_1__.INTERNAL),
+/* harmony export */   "_$LH": () => (/* reexport safe */ lit_html__WEBPACK_IMPORTED_MODULE_1__._$LH),
 /* harmony export */   "html": () => (/* reexport safe */ lit_html__WEBPACK_IMPORTED_MODULE_1__.html),
 /* harmony export */   "noChange": () => (/* reexport safe */ lit_html__WEBPACK_IMPORTED_MODULE_1__.noChange),
 /* harmony export */   "nothing": () => (/* reexport safe */ lit_html__WEBPACK_IMPORTED_MODULE_1__.nothing),
@@ -1664,7 +1845,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   "svg": () => (/* reexport safe */ lit_html__WEBPACK_IMPORTED_MODULE_1__.svg),
 /* harmony export */   "UpdatingElement": () => (/* binding */ UpdatingElement),
 /* harmony export */   "LitElement": () => (/* binding */ LitElement),
-/* harmony export */   "_Φ": () => (/* binding */ _Φ)
+/* harmony export */   "_$LE": () => (/* binding */ _$LE)
 /* harmony export */ });
 /* harmony import */ var _lit_reactive_element__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @lit/reactive-element */ "./node_modules/@lit/reactive-element/development/reactive-element.js");
 /* harmony import */ var lit_html__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! lit-html */ "./node_modules/lit-html/development/lit-html.js");
@@ -1673,8 +1854,7 @@ __webpack_require__.r(__webpack_exports__);
  * Copyright 2017 Google LLC
  * SPDX-License-Identifier: BSD-3-Clause
  */
-var _a, _b, _c, _d, _e;
-var _f;
+var _a, _b, _c;
 /**
  * The main LitElement module, which defines the [[`LitElement`]] base class and
  * related APIs.
@@ -1725,11 +1905,20 @@ var _f;
 // IE transpilation requires exporting like this.
 const UpdatingElement = _lit_reactive_element__WEBPACK_IMPORTED_MODULE_0__.ReactiveElement;
 const DEV_MODE = true;
-// IMPORTANT: do not change the property name or the assignment expression.
-// This line will be used in regexes to search for LitElement usage.
-// TODO(justinfagnani): inject version number at build time
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-((_a = (_f = globalThis)['litElementVersions']) !== null && _a !== void 0 ? _a : (_f['litElementVersions'] = [])).push('3.0.0-rc.1');
+let issueWarning;
+if (DEV_MODE) {
+    // Ensure warnings are issued only 1x, even if multiple versions of Lit
+    // are loaded.
+    const issuedWarnings = ((_a = globalThis.litIssuedWarnings) !== null && _a !== void 0 ? _a : (globalThis.litIssuedWarnings = new Set()));
+    // Issue a warning, if we haven't already.
+    issueWarning = (code, warning) => {
+        warning += ` See https://lit.dev/msg/${code} for more information.`;
+        if (!issuedWarnings.has(warning)) {
+            console.warn(warning);
+            issuedWarnings.add(warning);
+        }
+    };
+}
 /**
  * Base element class that manages element properties and attributes, and
  * renders a lit-html template.
@@ -1774,13 +1963,30 @@ class LitElement extends _lit_reactive_element__WEBPACK_IMPORTED_MODULE_0__.Reac
         // updates are allowed after super.update, it's important to call `render`
         // before that.
         const value = this.render();
+        if (!this.hasUpdated) {
+            this.renderOptions.isConnected = this.isConnected;
+        }
         super.update(changedProperties);
         this.__childPart = (0,lit_html__WEBPACK_IMPORTED_MODULE_1__.render)(value, this.renderRoot, this.renderOptions);
     }
-    // TODO(kschaaf): Consider debouncing directive disconnection so element moves
-    // do not thrash directive callbacks
-    // https://github.com/Polymer/lit-html/issues/1457
     /**
+     * Invoked when the component is added to the document's DOM.
+     *
+     * In `connectedCallback()` you should setup tasks that should only occur when
+     * the element is connected to the document. The most common of these is
+     * adding event listeners to nodes external to the element, like a keydown
+     * event handler added to the window.
+     *
+     * ```ts
+     * connectedCallback() {
+     *   super.connectedCallback();
+     *   addEventListener('keydown', this._handleKeydown);
+     * }
+     * ```
+     *
+     * Typically, anything done in `connectedCallback()` should be undone when the
+     * element is disconnected, in `disconnectedCallback()`.
+     *
      * @category lifecycle
      */
     connectedCallback() {
@@ -1789,6 +1995,22 @@ class LitElement extends _lit_reactive_element__WEBPACK_IMPORTED_MODULE_0__.Reac
         (_a = this.__childPart) === null || _a === void 0 ? void 0 : _a.setConnected(true);
     }
     /**
+     * Invoked when the component is removed from the document's DOM.
+     *
+     * This callback is the main signal to the element that it may no longer be
+     * used. `disconnectedCallback()` should ensure that nothing is holding a
+     * reference to the element (such as event listeners added to nodes external
+     * to the element), so that it is free to be garbage collected.
+     *
+     * ```ts
+     * disconnectedCallback() {
+     *   super.disconnectedCallback();
+     *   window.removeEventListener('keydown', this._handleKeydown);
+     * }
+     * ```
+     *
+     * An element may be re-connected after being disconnected.
+     *
      * @category lifecycle
      */
     disconnectedCallback() {
@@ -1815,42 +2037,40 @@ class LitElement extends _lit_reactive_element__WEBPACK_IMPORTED_MODULE_0__.Reac
  * optimizations. See @lit/reactive-element for more information.
  */
 LitElement['finalized'] = true;
-LitElement._$litElement$ = true;
+// This property needs to remain unminified.
+LitElement['_$litElement$'] = true;
 // Install hydration if available
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-(_c = (_b = globalThis)['litElementHydrateSupport']) === null || _c === void 0 ? void 0 : _c.call(_b, { LitElement });
+(_b = globalThis.litElementHydrateSupport) === null || _b === void 0 ? void 0 : _b.call(globalThis, { LitElement });
 // Apply polyfills if available
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-(_e = (_d = globalThis)['litElementPlatformSupport']) === null || _e === void 0 ? void 0 : _e.call(_d, { LitElement });
+const polyfillSupport = DEV_MODE
+    ? globalThis.litElementPolyfillSupportDevMode
+    : globalThis.litElementPolyfillSupport;
+polyfillSupport === null || polyfillSupport === void 0 ? void 0 : polyfillSupport({ LitElement });
 // DEV mode warnings
 if (DEV_MODE) {
+    /* eslint-disable @typescript-eslint/no-explicit-any */
     // Note, for compatibility with closure compilation, this access
     // needs to be as a string property index.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     LitElement['finalize'] = function () {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const finalized = _lit_reactive_element__WEBPACK_IMPORTED_MODULE_0__.ReactiveElement.finalize.call(this);
         if (!finalized) {
             return false;
         }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const warnRemoved = (obj, name) => {
-            if (obj[name] !== undefined) {
-                console.warn(`\`${name}\` is implemented. It ` +
-                    `has been removed from this version of LitElement. `
-                // TODO(sorvell): add link to changelog when location has stabilized.
-                // + See the changelog at https://github.com/Polymer/lit-html/blob/main/packages/lit-element/CHANGELOG.md`
-                );
+        const warnRemovedOrRenamed = (obj, name, renamed = false) => {
+            if (obj.hasOwnProperty(name)) {
+                const ctorName = (typeof obj === 'function' ? obj : obj.constructor)
+                    .name;
+                issueWarning(renamed ? 'renamed-api' : 'removed-api', `\`${name}\` is implemented on class ${ctorName}. It ` +
+                    `has been ${renamed ? 'renamed' : 'removed'} ` +
+                    `in this version of LitElement.`);
             }
         };
-        [`render`, `getStyles`].forEach((name) => 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        warnRemoved(this, name));
-        [`adoptStyles`].forEach((name) => 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        warnRemoved(this.prototype, name));
+        warnRemovedOrRenamed(this, 'render');
+        warnRemovedOrRenamed(this, 'getStyles', true);
+        warnRemovedOrRenamed(this.prototype, 'adoptStyles');
         return true;
     };
+    /* eslint-enable @typescript-eslint/no-explicit-any */
 }
 /**
  * END USERS SHOULD NOT RELY ON THIS OBJECT.
@@ -1860,7 +2080,7 @@ if (DEV_MODE) {
  *
  * We currently do not make a mangled rollup build of the lit-ssr code. In order
  * to keep a number of (otherwise private) top-level exports  mangled in the
- * client side code, we export a _Φ object containing those members (or
+ * client side code, we export a _$LE object containing those members (or
  * helper methods for accessing private fields of those members), and then
  * re-export them for use in lit-ssr. This keeps lit-ssr agnostic to whether the
  * client-side code is being used in `dev` mode or `prod` mode.
@@ -1870,7 +2090,7 @@ if (DEV_MODE) {
  *
  * @private
  */
-const _Φ = {
+const _$LE = {
     _$attributeToProperty: (el, name, value) => {
         // eslint-disable-next-line
         el._$attributeToProperty(name, value);
@@ -1878,6 +2098,13 @@ const _Φ = {
     // eslint-disable-next-line
     _$changedProperties: (el) => el._$changedProperties,
 };
+// IMPORTANT: do not change the property name or the assignment expression.
+// This line will be used in regexes to search for LitElement usage.
+((_c = globalThis.litElementVersions) !== null && _c !== void 0 ? _c : (globalThis.litElementVersions = [])).push('3.1.1');
+if (DEV_MODE && globalThis.litElementVersions.length > 1) {
+    issueWarning('multiple-versions', `Multiple versions of Lit loaded. Loading multiple versions ` +
+        `is not recommended.`);
+}
 //# sourceMappingURL=lit-element.js.map
 
 /***/ }),
@@ -1890,28 +2117,47 @@ const _Φ = {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   "INTERNAL": () => (/* binding */ INTERNAL),
 /* harmony export */   "html": () => (/* binding */ html),
 /* harmony export */   "svg": () => (/* binding */ svg),
 /* harmony export */   "noChange": () => (/* binding */ noChange),
 /* harmony export */   "nothing": () => (/* binding */ nothing),
 /* harmony export */   "render": () => (/* binding */ render),
-/* harmony export */   "_Σ": () => (/* binding */ _Σ)
+/* harmony export */   "_$LH": () => (/* binding */ _$LH)
 /* harmony export */ });
 /**
  * @license
  * Copyright 2017 Google LLC
  * SPDX-License-Identifier: BSD-3-Clause
  */
-var _a, _b, _c, _d, _e;
-var _f;
+var _a, _b, _c, _d;
 const DEV_MODE = true;
 const ENABLE_EXTRA_SECURITY_HOOKS = true;
 const ENABLE_SHADYDOM_NOPATCH = true;
+/**
+ * `true` if we're building for google3 with temporary back-compat helpers.
+ * This export is not present in prod builds.
+ * @internal
+ */
+const INTERNAL = true;
+let issueWarning;
 if (DEV_MODE) {
-    console.warn('lit-html is in dev mode. Not recommended for production!');
+    (_a = globalThis.litIssuedWarnings) !== null && _a !== void 0 ? _a : (globalThis.litIssuedWarnings = new Set());
+    // Issue a warning, if we haven't already.
+    issueWarning = (code, warning) => {
+        warning += code
+            ? ` See https://lit.dev/msg/${code} for more information.`
+            : '';
+        if (!globalThis.litIssuedWarnings.has(warning)) {
+            console.warn(warning);
+            globalThis.litIssuedWarnings.add(warning);
+        }
+    };
+    issueWarning('dev-mode', `Lit is in dev mode. Not recommended for production!`);
 }
-const wrap = ENABLE_SHADYDOM_NOPATCH && ((_a = window.ShadyDOM) === null || _a === void 0 ? void 0 : _a.inUse) &&
-    ((_b = window.ShadyDOM) === null || _b === void 0 ? void 0 : _b.noPatch) === true
+const wrap = ENABLE_SHADYDOM_NOPATCH &&
+    ((_b = window.ShadyDOM) === null || _b === void 0 ? void 0 : _b.inUse) &&
+    ((_c = window.ShadyDOM) === null || _c === void 0 ? void 0 : _c.noPatch) === true
     ? window.ShadyDOM.wrap
     : (node) => node;
 const trustedTypes = globalThis.trustedTypes;
@@ -2051,14 +2297,33 @@ const COMMENT_PART = 7;
  * Generates a template literal tag function that returns a TemplateResult with
  * the given result type.
  */
-const tag = (_$litType$) => (strings, ...values) => ({
-    _$litType$,
-    strings,
-    values,
-});
+const tag = (type) => (strings, ...values) => {
+    // Warn against templates octal escape sequences
+    // We do this here rather than in render so that the warning is closer to the
+    // template definition.
+    if (DEV_MODE && strings.some((s) => s === undefined)) {
+        console.warn('Some template strings are undefined.\n' +
+            'This is probably caused by illegal octal escape sequences.');
+    }
+    return {
+        // This property needs to remain unminified.
+        ['_$litType$']: type,
+        strings,
+        values,
+    };
+};
 /**
  * Interprets a template literal as an HTML template that can efficiently
  * render to and update a container.
+ *
+ * ```ts
+ * const header = (title: string) => html`<h1>${title}</h1>`;
+ * ```
+ *
+ * The `html` tag returns a description of the DOM to render as a value. It is
+ * lazy, meaning no work is done until the template is rendered. When rendering,
+ * if a template comes from the same expression as a previously rendered result,
+ * it's efficiently updated instead of replaced.
  */
 const html = tag(HTML_RESULT);
 /**
@@ -2073,6 +2338,22 @@ const svg = tag(SVG_RESULT);
 const noChange = Symbol.for('lit-noChange');
 /**
  * A sentinel value that signals a ChildPart to fully clear its content.
+ *
+ * ```ts
+ * const button = html`${
+ *  user.isAdmin
+ *    ? html`<button>DELETE</button>`
+ *    : nothing
+ * }`;
+ * ```
+ *
+ * Prefer using `nothing` over other falsy values as it provides a consistent
+ * behavior between various expression binding contexts.
+ *
+ * In child expressions, `undefined`, `null`, `''`, and `nothing` all behave the
+ * same and render no nodes. In attribute expressions, `nothing` _removes_ the
+ * attribute, while `undefined` and `null` will render an empty string. In
+ * property expressions `nothing` becomes `undefined`.
  */
 const nothing = Symbol.for('lit-nothing');
 /**
@@ -2090,14 +2371,28 @@ const templateCache = new WeakMap();
  * @param options
  */
 const render = (value, container, options) => {
-    var _a, _b;
+    var _a, _b, _c;
     const partOwnerNode = (_a = options === null || options === void 0 ? void 0 : options.renderBefore) !== null && _a !== void 0 ? _a : container;
+    // This property needs to remain unminified.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let part = partOwnerNode._$litPart$;
+    let part = partOwnerNode['_$litPart$'];
     if (part === undefined) {
         const endNode = (_b = options === null || options === void 0 ? void 0 : options.renderBefore) !== null && _b !== void 0 ? _b : null;
+        // Internal modification: don't clear container to match lit-html 2.0
+        if (INTERNAL &&
+            ((_c = options) === null || _c === void 0 ? void 0 : _c.clearContainerForLit2MigrationOnly) ===
+                true) {
+            let n = container.firstChild;
+            // Clear only up to the `endNode` aka `renderBefore` node.
+            while (n && n !== endNode) {
+                const next = n.nextSibling;
+                n.remove();
+                n = next;
+            }
+        }
+        // This property needs to remain unminified.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        partOwnerNode._$litPart$ = part = new ChildPart(container.insertBefore(createMarker(), endNode), endNode, undefined, options);
+        partOwnerNode['_$litPart$'] = part = new ChildPart(container.insertBefore(createMarker(), endNode), endNode, undefined, options !== null && options !== void 0 ? options : {});
     }
     part._$setValue(value);
     return part;
@@ -2106,7 +2401,8 @@ if (ENABLE_EXTRA_SECURITY_HOOKS) {
     render.setSanitizer = setSanitizer;
     render.createSanitizer = createSanitizer;
     if (DEV_MODE) {
-        render._testOnlyClearSanitizerFactoryDoNotCallOrElse = _testOnlyClearSanitizerFactoryDoNotCallOrElse;
+        render._testOnlyClearSanitizerFactoryDoNotCallOrElse =
+            _testOnlyClearSanitizerFactoryDoNotCallOrElse;
     }
 }
 const walker = d.createTreeWalker(d, 129 /* NodeFilter.SHOW_{ELEMENT|COMMENT} */, null, false);
@@ -2181,7 +2477,10 @@ const getTemplateHtml = (strings, type) => {
                     regex = tagEndRegex;
                 }
                 else if (match[DYNAMIC_TAG_NAME] !== undefined) {
-                    // dynamic tag name
+                    if (DEV_MODE) {
+                        throw new Error('Bindings in tag names are not supported. Please use static templates instead. ' +
+                            'See https://lit.dev/docs/templates/expressions/#static-expressions');
+                    }
                     regex = tagEndRegex;
                 }
             }
@@ -2260,6 +2559,22 @@ const getTemplateHtml = (strings, type) => {
                         (attrNameEndIndex === -2 ? (attrNames.push(undefined), i) : end);
     }
     const htmlResult = html + (strings[l] || '<?>') + (type === SVG_RESULT ? '</svg>' : '');
+    // A security check to prevent spoofing of Lit template results.
+    // In the future, we may be able to replace this with Array.isTemplateObject,
+    // though we might need to make that check inside of the html and svg
+    // functions, because precompiled templates don't come in as
+    // TemplateStringArray objects.
+    if (!Array.isArray(strings) || !strings.hasOwnProperty('raw')) {
+        let message = 'invalid template strings array';
+        if (DEV_MODE) {
+            message =
+                `Internal Error: expected template strings to be an array ` +
+                    `with a 'raw' field. Please file a bug at ` +
+                    `https://github.com/lit/lit/issues/new?template=bug_report.md ` +
+                    `and include information about your build tooling, if any.`;
+        }
+        throw new Error(message);
+    }
     // Returned as an array for terseness
     return [
         policy !== undefined
@@ -2269,7 +2584,9 @@ const getTemplateHtml = (strings, type) => {
     ];
 };
 class Template {
-    constructor({ strings, _$litType$: type }, options) {
+    constructor(
+    // This property needs to remain unminified.
+    { strings, ['_$litType$']: type }, options) {
         /** @internal */
         this.parts = [];
         let node;
@@ -2291,6 +2608,24 @@ class Template {
         // Walk the template to find binding markers and create TemplateParts
         while ((node = walker.nextNode()) !== null && parts.length < partCount) {
             if (node.nodeType === 1) {
+                if (DEV_MODE) {
+                    const tag = node.localName;
+                    // Warn if `textarea` includes an expression and throw if `template`
+                    // does since these are not supported. We do this by checking
+                    // innerHTML for anything that looks like a marker. This catches
+                    // cases like bindings in textarea there markers turn into text nodes.
+                    if (/^(?:textarea|template)$/i.test(tag) &&
+                        node.innerHTML.includes(marker)) {
+                        const m = `Expressions are not supported inside \`${tag}\` ` +
+                            `elements. See https://lit.dev/msg/expression-in-${tag} for more ` +
+                            `information.`;
+                        if (tag === 'template') {
+                            throw new Error(m);
+                        }
+                        else
+                            issueWarning('', m);
+                    }
+                }
                 // TODO (justinfagnani): for attempted dynamic tag names, we don't
                 // increment the bindingIndex, and it'll be off by 1 in the element
                 // and off by two after it.
@@ -2357,7 +2692,8 @@ class Template {
                         // Generate a new text node for each literal section
                         // These nodes are also used as the markers for node parts
                         // We can't use empty text nodes as markers because they're
-                        // normalized in some browsers (TODO: check)
+                        // normalized when cloning in IE (could simplify when
+                        // IE is no longer supported)
                         for (let i = 0; i < lastIndex; i++) {
                             node.append(strings[i], createMarker());
                             // Walk past the marker node we just added
@@ -2381,8 +2717,6 @@ class Template {
                     while ((i = node.data.indexOf(marker, i + 1)) !== -1) {
                         // Comment node has a binding marker inside, make an inactive part
                         // The binding won't work, but subsequent bindings will
-                        // TODO (justinfagnani): consider whether it's even worth it to
-                        // make bindings in comments work
                         parts.push({ type: COMMENT_PART, index: nodeIndex });
                         // Move to the end of the match
                         i += marker.length - 1;
@@ -2392,7 +2726,8 @@ class Template {
             nodeIndex++;
         }
     }
-    // Overridden via `litHtmlPlatformSupport` to provide platform support.
+    // Overridden via `litHtmlPolyfillSupport` to provide platform support.
+    /** @nocollapse */
     static createElement(html, _options) {
         const el = d.createElement('template');
         el.innerHTML = html;
@@ -2408,12 +2743,15 @@ function resolveDirective(part, value, parent = part, attributeIndex) {
         return value;
     }
     let currentDirective = attributeIndex !== undefined
-        ? (_a = parent.__directives) === null || _a === void 0 ? void 0 : _a[attributeIndex] : parent.__directive;
+        ? (_a = parent.__directives) === null || _a === void 0 ? void 0 : _a[attributeIndex]
+        : parent.__directive;
     const nextDirectiveConstructor = isPrimitive(value)
         ? undefined
-        : value._$litDirective$;
+        : // This property needs to remain unminified.
+            value['_$litDirective$'];
     if ((currentDirective === null || currentDirective === void 0 ? void 0 : currentDirective.constructor) !== nextDirectiveConstructor) {
-        (_b = currentDirective === null || currentDirective === void 0 ? void 0 : currentDirective._$setDirectiveConnected) === null || _b === void 0 ? void 0 : _b.call(currentDirective, false);
+        // This property needs to remain unminified.
+        (_b = currentDirective === null || currentDirective === void 0 ? void 0 : currentDirective['_$notifyDirectiveConnectionChanged']) === null || _b === void 0 ? void 0 : _b.call(currentDirective, false);
         if (nextDirectiveConstructor === undefined) {
             currentDirective = undefined;
         }
@@ -2422,7 +2760,8 @@ function resolveDirective(part, value, parent = part, attributeIndex) {
             currentDirective._$initialize(part, parent, attributeIndex);
         }
         if (attributeIndex !== undefined) {
-            ((_c = (_d = parent).__directives) !== null && _c !== void 0 ? _c : (_d.__directives = []))[attributeIndex] = currentDirective;
+            ((_c = (_d = parent).__directives) !== null && _c !== void 0 ? _c : (_d.__directives = []))[attributeIndex] =
+                currentDirective;
         }
         else {
             parent.__directive = currentDirective;
@@ -2442,9 +2781,17 @@ class TemplateInstance {
         /** @internal */
         this._parts = [];
         /** @internal */
-        this._$disconnetableChildren = undefined;
+        this._$disconnectableChildren = undefined;
         this._$template = template;
         this._$parent = parent;
+    }
+    // Called by ChildPart parentNode getter
+    get parentNode() {
+        return this._$parent.parentNode;
+    }
+    // See comment in Disconnectable interface for why this is a getter
+    get _$isConnected() {
+        return this._$parent._$isConnected;
     }
     // This method is separate from the constructor because we need to return a
     // DocumentFragment and we don't want to hold onto it with an instance field.
@@ -2500,28 +2847,33 @@ class TemplateInstance {
 }
 class ChildPart {
     constructor(startNode, endNode, parent, options) {
+        var _a;
         this.type = CHILD_PART;
+        this._$committedValue = nothing;
         // The following fields will be patched onto ChildParts when required by
         // AsyncDirective
         /** @internal */
-        this._$disconnetableChildren = undefined;
+        this._$disconnectableChildren = undefined;
         this._$startNode = startNode;
         this._$endNode = endNode;
         this._$parent = parent;
         this.options = options;
+        // Note __isConnected is only ever accessed on RootParts (i.e. when there is
+        // no _$parent); the value on a non-root-part is "don't care", but checking
+        // for parent would be more code
+        this.__isConnected = (_a = options === null || options === void 0 ? void 0 : options.isConnected) !== null && _a !== void 0 ? _a : true;
         if (ENABLE_EXTRA_SECURITY_HOOKS) {
             // Explicitly initialize for consistent class shape.
             this._textSanitizer = undefined;
         }
     }
-    /**
-     * Sets the connection state for any `AsyncDirectives` contained
-     * within this part and runs their `disconnected` or `reconnected`, according
-     * to the `isConnected` argument.
-     */
-    setConnected(isConnected) {
-        var _a;
-        (_a = this._$setChildPartConnected) === null || _a === void 0 ? void 0 : _a.call(this, isConnected);
+    // See comment in Disconnectable interface for why this is a getter
+    get _$isConnected() {
+        var _a, _b;
+        // ChildParts that are not at the root should always be created with a
+        // parent; only RootChildNode's won't, so they return the local isConnected
+        // state
+        return (_b = (_a = this._$parent) === null || _a === void 0 ? void 0 : _a._$isConnected) !== null && _b !== void 0 ? _b : this.__isConnected;
     }
     /**
      * The parent node into which the part renders its content.
@@ -2542,7 +2894,16 @@ class ChildPart {
      * consists of all child nodes of `.parentNode`.
      */
     get parentNode() {
-        return wrap(this._$startNode).parentNode;
+        let parentNode = wrap(this._$startNode).parentNode;
+        const parent = this._$parent;
+        if (parent !== undefined &&
+            parentNode.nodeType === 11 /* Node.DOCUMENT_FRAGMENT */) {
+            // If the parentNode is a DocumentFragment, it may be because the DOM is
+            // still in the cloned fragment during initial render; if so, get the real
+            // parentNode the part will be committed into by asking the parent.
+            parentNode = parent.parentNode;
+        }
+        return parentNode;
     }
     /**
      * The part's leading marker node, if any. See `.parentNode` for more
@@ -2559,6 +2920,9 @@ class ChildPart {
         return this._$endNode;
     }
     _$setValue(value, directiveParent = this) {
+        if (DEV_MODE && this.parentNode === null) {
+            throw new Error(`This \`ChildPart\` has no \`parentNode\` and therefore cannot accept a value. This likely means the element containing the part was manipulated in an unsupported way outside of Lit's control such that the part's marker nodes were ejected from DOM. For example, setting the element's \`innerHTML\` or \`textContent\` can do this.`);
+        }
         value = resolveDirective(this, value, directiveParent);
         if (isPrimitive(value)) {
             // Non-rendering child values. It's important that these do not render
@@ -2573,8 +2937,9 @@ class ChildPart {
             else if (value !== this._$committedValue && value !== noChange) {
                 this._commitText(value);
             }
+            // This property needs to remain unminified.
         }
-        else if (value._$litType$ !== undefined) {
+        else if (value['_$litType$'] !== undefined) {
             this._commitTemplateResult(value);
         }
         else if (value.nodeType !== undefined) {
@@ -2599,30 +2964,44 @@ class ChildPart {
                 sanitizerFactoryInternal !== noopSanitizer) {
                 const parentNodeName = (_a = this._$startNode.parentNode) === null || _a === void 0 ? void 0 : _a.nodeName;
                 if (parentNodeName === 'STYLE' || parentNodeName === 'SCRIPT') {
-                    this._insert(new Text('/* lit-html will not write ' +
-                        'TemplateResults to scripts and styles */'));
-                    return;
+                    let message = 'Forbidden';
+                    if (DEV_MODE) {
+                        if (parentNodeName === 'STYLE') {
+                            message =
+                                `Lit does not support binding inside style nodes. ` +
+                                    `This is a security risk, as style injection attacks can ` +
+                                    `exfiltrate data and spoof UIs. ` +
+                                    `Consider instead using css\`...\` literals ` +
+                                    `to compose styles, and make do dynamic styling with ` +
+                                    `css custom properties, ::parts, <slot>s, ` +
+                                    `and by mutating the DOM rather than stylesheets.`;
+                        }
+                        else {
+                            message =
+                                `Lit does not support binding inside script nodes. ` +
+                                    `This is a security risk, as it could allow arbitrary ` +
+                                    `code execution.`;
+                        }
+                    }
+                    throw new Error(message);
                 }
             }
             this._$committedValue = this._insert(value);
         }
     }
     _commitText(value) {
-        const node = wrap(this._$startNode).nextSibling;
-        // TODO(justinfagnani): Can we just check if this._$committedValue is primitive?
-        if (node !== null &&
-            node.nodeType === 3 /* Node.TEXT_NODE */ &&
-            (this._$endNode === null
-                ? wrap(node).nextSibling === null
-                : node === wrap(this._$endNode).previousSibling)) {
+        // If the committed value is a primitive it means we called _commitText on
+        // the previous render, and we know that this._$startNode.nextSibling is a
+        // Text node. We can now just replace the text content (.data) of the node.
+        if (this._$committedValue !== nothing &&
+            isPrimitive(this._$committedValue)) {
+            const node = wrap(this._$startNode).nextSibling;
             if (ENABLE_EXTRA_SECURITY_HOOKS) {
                 if (this._textSanitizer === undefined) {
                     this._textSanitizer = createSanitizer(node, 'data', 'property');
                 }
                 value = this._textSanitizer(value);
             }
-            // If we only have a single text node between the markers, we can just
-            // set its value, rather than replacing it.
             node.data = value;
         }
         else {
@@ -2647,16 +3026,17 @@ class ChildPart {
     }
     _commitTemplateResult(result) {
         var _a;
-        const { values, _$litType$ } = result;
+        // This property needs to remain unminified.
+        const { values, ['_$litType$']: type } = result;
         // If $litType$ is a number, result is a plain TemplateResult and we get
         // the template from the template cache. If not, result is a
         // CompiledTemplateResult and _$litType$ is a CompiledTemplate and we need
         // to create the <template> element the first time we see it.
-        const template = typeof _$litType$ === 'number'
+        const template = typeof type === 'number'
             ? this._$getTemplate(result)
-            : (_$litType$.el === undefined &&
-                (_$litType$.el = Template.createElement(_$litType$.h, this.options)),
-                _$litType$);
+            : (type.el === undefined &&
+                (type.el = Template.createElement(type.h, this.options)),
+                type);
         if (((_a = this._$committedValue) === null || _a === void 0 ? void 0 : _a._$template) === template) {
             this._$committedValue._update(values);
         }
@@ -2668,7 +3048,7 @@ class ChildPart {
             this._$committedValue = instance;
         }
     }
-    // Overridden via `litHtmlPlatformSupport` to provide platform support.
+    // Overridden via `litHtmlPolyfillSupport` to provide platform support.
     /** @internal */
     _$getTemplate(result) {
         let template = templateCache.get(result.strings);
@@ -2701,7 +3081,7 @@ class ChildPart {
                 // If no existing part, create a new one
                 // TODO (justinfagnani): test perf impact of always creating two parts
                 // instead of sharing parts between nodes
-                // https://github.com/Polymer/lit-html/issues/1266
+                // https://github.com/lit/lit/issues/1266
                 itemParts.push((itemPart = new ChildPart(this._insert(createMarker()), this._insert(createMarker()), this, this.options)));
             }
             else {
@@ -2731,11 +3111,29 @@ class ChildPart {
      */
     _$clear(start = wrap(this._$startNode).nextSibling, from) {
         var _a;
-        (_a = this._$setChildPartConnected) === null || _a === void 0 ? void 0 : _a.call(this, false, true, from);
+        (_a = this._$notifyConnectionChanged) === null || _a === void 0 ? void 0 : _a.call(this, false, true, from);
         while (start && start !== this._$endNode) {
             const n = wrap(start).nextSibling;
             wrap(start).remove();
             start = n;
+        }
+    }
+    /**
+     * Implementation of RootPart's `isConnected`. Note that this metod
+     * should only be called on `RootPart`s (the `ChildPart` returned from a
+     * top-level `render()` call). It has no effect on non-root ChildParts.
+     * @param isConnected Whether to set
+     * @internal
+     */
+    setConnected(isConnected) {
+        var _a;
+        if (this._$parent === undefined) {
+            this.__isConnected = isConnected;
+            (_a = this._$notifyConnectionChanged) === null || _a === void 0 ? void 0 : _a.call(this, isConnected);
+        }
+        else if (DEV_MODE) {
+            throw new Error('part.setConnected() may only be called on a ' +
+                'RootPart returned from render().');
         }
     }
 }
@@ -2745,15 +3143,13 @@ class AttributePart {
         /** @internal */
         this._$committedValue = nothing;
         /** @internal */
-        this._$disconnetableChildren = undefined;
-        /** @internal */
-        this._setDirectiveConnected = undefined;
+        this._$disconnectableChildren = undefined;
         this.element = element;
         this.name = name;
         this._$parent = parent;
         this.options = options;
         if (strings.length > 2 || strings[0] !== '' || strings[1] !== '') {
-            this._$committedValue = new Array(strings.length - 1).fill(nothing);
+            this._$committedValue = new Array(strings.length - 1).fill(new String());
             this.strings = strings;
         }
         else {
@@ -2765,6 +3161,10 @@ class AttributePart {
     }
     get tagName() {
         return this.element.tagName;
+    }
+    // See comment in Disconnectable interface for why this is a getter
+    get _$isConnected() {
+        return this._$parent._$isConnected;
     }
     /**
      * Sets the value of this part by resolving the value from possibly multiple
@@ -2862,6 +3262,13 @@ class PropertyPart extends AttributePart {
         this.element[this.name] = value === nothing ? undefined : value;
     }
 }
+// Temporary workaround for https://crbug.com/993268
+// Currently, any attribute starting with "on" is considered to be a
+// TrustedScript source. Such boolean attributes must be set to the equivalent
+// trusted emptyScript value.
+const emptyStringForBooleanAttribute = trustedTypes
+    ? trustedTypes.emptyScript
+    : '';
 class BooleanAttributePart extends AttributePart {
     constructor() {
         super(...arguments);
@@ -2870,7 +3277,7 @@ class BooleanAttributePart extends AttributePart {
     /** @internal */
     _commitValue(value) {
         if (value && value !== nothing) {
-            wrap(this.element).setAttribute(this.name, '');
+            wrap(this.element).setAttribute(this.name, emptyStringForBooleanAttribute);
         }
         else {
             wrap(this.element).removeAttribute(this.name);
@@ -2878,16 +3285,22 @@ class BooleanAttributePart extends AttributePart {
     }
 }
 class EventPart extends AttributePart {
-    constructor() {
-        super(...arguments);
+    constructor(element, name, strings, parent, options) {
+        super(element, name, strings, parent, options);
         this.type = EVENT_PART;
+        if (DEV_MODE && this.strings !== undefined) {
+            throw new Error(`A \`<${element.localName}>\` has a \`@${name}=...\` listener with ` +
+                'invalid content. Event listeners in templates must have exactly ' +
+                'one expression and no surrounding text.');
+        }
     }
     // EventPart does not use the base _$setValue/_resolveValue implementation
     // since the dirty checking is more complex
     /** @internal */
     _$setValue(newListener, directiveParent = this) {
         var _a;
-        newListener = (_a = resolveDirective(this, newListener, directiveParent, 0)) !== null && _a !== void 0 ? _a : nothing;
+        newListener =
+            (_a = resolveDirective(this, newListener, directiveParent, 0)) !== null && _a !== void 0 ? _a : nothing;
         if (newListener === noChange) {
             return;
         }
@@ -2919,8 +3332,6 @@ class EventPart extends AttributePart {
     handleEvent(event) {
         var _a, _b;
         if (typeof this._$committedValue === 'function') {
-            // TODO (justinfagnani): do we need to default to this.element?
-            // It'll always be the same as `e.currentTarget`.
             this._$committedValue.call((_b = (_a = this.options) === null || _a === void 0 ? void 0 : _a.host) !== null && _b !== void 0 ? _b : this.element, event);
         }
         else {
@@ -2933,11 +3344,13 @@ class ElementPart {
         this.element = element;
         this.type = ELEMENT_PART;
         /** @internal */
-        this._$disconnetableChildren = undefined;
-        /** @internal */
-        this._setDirectiveConnected = undefined;
+        this._$disconnectableChildren = undefined;
         this._$parent = parent;
         this.options = options;
+    }
+    // See comment in Disconnectable interface for why this is a getter
+    get _$isConnected() {
+        return this._$parent._$isConnected;
     }
     _$setValue(value) {
         resolveDirective(this, value);
@@ -2951,7 +3364,7 @@ class ElementPart {
  *
  * We currently do not make a mangled rollup build of the lit-ssr code. In order
  * to keep a number of (otherwise private) top-level exports  mangled in the
- * client side code, we export a _Σ object containing those members (or
+ * client side code, we export a _$LH object containing those members (or
  * helper methods for accessing private fields of those members), and then
  * re-export them for use in lit-ssr. This keeps lit-ssr agnostic to whether the
  * client-side code is being used in `dev` mode or `prod` mode.
@@ -2961,7 +3374,7 @@ class ElementPart {
  *
  * @private
  */
-const _Σ = {
+const _$LH = {
     // Used in lit-ssr
     _boundAttributeSuffix: boundAttributeSuffix,
     _marker: marker,
@@ -2981,13 +3394,17 @@ const _Σ = {
     _ElementPart: ElementPart,
 };
 // Apply polyfills if available
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-(_d = (_c = globalThis)['litHtmlPlatformSupport']) === null || _d === void 0 ? void 0 : _d.call(_c, Template, ChildPart);
+const polyfillSupport = DEV_MODE
+    ? window.litHtmlPolyfillSupportDevMode
+    : window.litHtmlPolyfillSupport;
+polyfillSupport === null || polyfillSupport === void 0 ? void 0 : polyfillSupport(Template, ChildPart);
 // IMPORTANT: do not change the property name or the assignment expression.
 // This line will be used in regexes to search for lit-html usage.
-// TODO(justinfagnani): inject version number at build time
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-((_e = (_f = globalThis)['litHtmlVersions']) !== null && _e !== void 0 ? _e : (_f['litHtmlVersions'] = [])).push('2.0.0-rc.2');
+((_d = globalThis.litHtmlVersions) !== null && _d !== void 0 ? _d : (globalThis.litHtmlVersions = [])).push('2.1.1');
+if (DEV_MODE && globalThis.litHtmlVersions.length > 1) {
+    issueWarning('multiple-versions', `Multiple versions of Lit loaded. ` +
+        `Loading multiple versions is not recommended.`);
+}
 //# sourceMappingURL=lit-html.js.map
 
 /***/ }),
@@ -3007,7 +3424,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   "query": () => (/* reexport safe */ _lit_reactive_element_decorators_query_js__WEBPACK_IMPORTED_MODULE_4__.query),
 /* harmony export */   "queryAll": () => (/* reexport safe */ _lit_reactive_element_decorators_query_all_js__WEBPACK_IMPORTED_MODULE_5__.queryAll),
 /* harmony export */   "queryAsync": () => (/* reexport safe */ _lit_reactive_element_decorators_query_async_js__WEBPACK_IMPORTED_MODULE_6__.queryAsync),
-/* harmony export */   "queryAssignedNodes": () => (/* reexport safe */ _lit_reactive_element_decorators_query_assigned_nodes_js__WEBPACK_IMPORTED_MODULE_7__.queryAssignedNodes)
+/* harmony export */   "queryAssignedElements": () => (/* reexport safe */ _lit_reactive_element_decorators_query_assigned_elements_js__WEBPACK_IMPORTED_MODULE_7__.queryAssignedElements),
+/* harmony export */   "queryAssignedNodes": () => (/* reexport safe */ _lit_reactive_element_decorators_query_assigned_nodes_js__WEBPACK_IMPORTED_MODULE_8__.queryAssignedNodes)
 /* harmony export */ });
 /* harmony import */ var _lit_reactive_element_decorators_custom_element_js__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @lit/reactive-element/decorators/custom-element.js */ "./node_modules/@lit/reactive-element/development/decorators/custom-element.js");
 /* harmony import */ var _lit_reactive_element_decorators_property_js__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @lit/reactive-element/decorators/property.js */ "./node_modules/@lit/reactive-element/development/decorators/property.js");
@@ -3016,7 +3434,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _lit_reactive_element_decorators_query_js__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @lit/reactive-element/decorators/query.js */ "./node_modules/@lit/reactive-element/development/decorators/query.js");
 /* harmony import */ var _lit_reactive_element_decorators_query_all_js__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @lit/reactive-element/decorators/query-all.js */ "./node_modules/@lit/reactive-element/development/decorators/query-all.js");
 /* harmony import */ var _lit_reactive_element_decorators_query_async_js__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @lit/reactive-element/decorators/query-async.js */ "./node_modules/@lit/reactive-element/development/decorators/query-async.js");
-/* harmony import */ var _lit_reactive_element_decorators_query_assigned_nodes_js__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @lit/reactive-element/decorators/query-assigned-nodes.js */ "./node_modules/@lit/reactive-element/development/decorators/query-assigned-nodes.js");
+/* harmony import */ var _lit_reactive_element_decorators_query_assigned_elements_js__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @lit/reactive-element/decorators/query-assigned-elements.js */ "./node_modules/@lit/reactive-element/development/decorators/query-assigned-elements.js");
+/* harmony import */ var _lit_reactive_element_decorators_query_assigned_nodes_js__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @lit/reactive-element/decorators/query-assigned-nodes.js */ "./node_modules/@lit/reactive-element/development/decorators/query-assigned-nodes.js");
 
 //# sourceMappingURL=decorators.js.map
 
@@ -3032,11 +3451,12 @@ __webpack_require__.r(__webpack_exports__);
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   "CSSResult": () => (/* reexport safe */ lit_element_lit_element_js__WEBPACK_IMPORTED_MODULE_2__.CSSResult),
+/* harmony export */   "INTERNAL": () => (/* reexport safe */ lit_element_lit_element_js__WEBPACK_IMPORTED_MODULE_2__.INTERNAL),
 /* harmony export */   "LitElement": () => (/* reexport safe */ lit_element_lit_element_js__WEBPACK_IMPORTED_MODULE_2__.LitElement),
 /* harmony export */   "ReactiveElement": () => (/* reexport safe */ lit_element_lit_element_js__WEBPACK_IMPORTED_MODULE_2__.ReactiveElement),
 /* harmony export */   "UpdatingElement": () => (/* reexport safe */ lit_element_lit_element_js__WEBPACK_IMPORTED_MODULE_2__.UpdatingElement),
-/* harmony export */   "_Σ": () => (/* reexport safe */ lit_element_lit_element_js__WEBPACK_IMPORTED_MODULE_2__["_Σ"]),
-/* harmony export */   "_Φ": () => (/* reexport safe */ lit_element_lit_element_js__WEBPACK_IMPORTED_MODULE_2__["_Φ"]),
+/* harmony export */   "_$LE": () => (/* reexport safe */ lit_element_lit_element_js__WEBPACK_IMPORTED_MODULE_2__._$LE),
+/* harmony export */   "_$LH": () => (/* reexport safe */ lit_element_lit_element_js__WEBPACK_IMPORTED_MODULE_2__._$LH),
 /* harmony export */   "adoptStyles": () => (/* reexport safe */ lit_element_lit_element_js__WEBPACK_IMPORTED_MODULE_2__.adoptStyles),
 /* harmony export */   "css": () => (/* reexport safe */ lit_element_lit_element_js__WEBPACK_IMPORTED_MODULE_2__.css),
 /* harmony export */   "defaultConverter": () => (/* reexport safe */ lit_element_lit_element_js__WEBPACK_IMPORTED_MODULE_2__.defaultConverter),
@@ -3050,8 +3470,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   "svg": () => (/* reexport safe */ lit_element_lit_element_js__WEBPACK_IMPORTED_MODULE_2__.svg),
 /* harmony export */   "unsafeCSS": () => (/* reexport safe */ lit_element_lit_element_js__WEBPACK_IMPORTED_MODULE_2__.unsafeCSS)
 /* harmony export */ });
-/* harmony import */ var lit_html__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! lit-html */ "./node_modules/lit-html/development/lit-html.js");
-/* harmony import */ var _lit_reactive_element__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @lit/reactive-element */ "./node_modules/@lit/reactive-element/development/reactive-element.js");
+/* harmony import */ var _lit_reactive_element__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @lit/reactive-element */ "./node_modules/@lit/reactive-element/development/reactive-element.js");
+/* harmony import */ var lit_html__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! lit-html */ "./node_modules/lit-html/development/lit-html.js");
 /* harmony import */ var lit_element_lit_element_js__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! lit-element/lit-element.js */ "./node_modules/lit-element/development/lit-element.js");
 
 //# sourceMappingURL=index.js.map
@@ -3127,21 +3547,25 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var lit__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! lit */ "./node_modules/lit/index.js");
 /* harmony import */ var lit_decorators_js__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! lit/decorators.js */ "./node_modules/lit/decorators.js");
-function _typeof(obj) { "@babel/helpers - typeof"; if (typeof Symbol === "function" && typeof Symbol.iterator === "symbol") { _typeof = function _typeof(obj) { return typeof obj; }; } else { _typeof = function _typeof(obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; }; } return _typeof(obj); }
+function _typeof(obj) { "@babel/helpers - typeof"; return _typeof = "function" == typeof Symbol && "symbol" == typeof Symbol.iterator ? function (obj) { return typeof obj; } : function (obj) { return obj && "function" == typeof Symbol && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; }, _typeof(obj); }
 
 var _templateObject, _templateObject2;
 
 function _taggedTemplateLiteral(strings, raw) { if (!raw) { raw = strings.slice(0); } return Object.freeze(Object.defineProperties(strings, { raw: { value: Object.freeze(raw) } })); }
 
+function _defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } }
+
+function _createClass(Constructor, protoProps, staticProps) { if (protoProps) _defineProperties(Constructor.prototype, protoProps); if (staticProps) _defineProperties(Constructor, staticProps); Object.defineProperty(Constructor, "prototype", { writable: false }); return Constructor; }
+
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
 
-function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function"); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, writable: true, configurable: true } }); if (superClass) _setPrototypeOf(subClass, superClass); }
+function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function"); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, writable: true, configurable: true } }); Object.defineProperty(subClass, "prototype", { writable: false }); if (superClass) _setPrototypeOf(subClass, superClass); }
 
 function _setPrototypeOf(o, p) { _setPrototypeOf = Object.setPrototypeOf || function _setPrototypeOf(o, p) { o.__proto__ = p; return o; }; return _setPrototypeOf(o, p); }
 
 function _createSuper(Derived) { var hasNativeReflectConstruct = _isNativeReflectConstruct(); return function _createSuperInternal() { var Super = _getPrototypeOf(Derived), result; if (hasNativeReflectConstruct) { var NewTarget = _getPrototypeOf(this).constructor; result = Reflect.construct(Super, arguments, NewTarget); } else { result = Super.apply(this, arguments); } return _possibleConstructorReturn(this, result); }; }
 
-function _possibleConstructorReturn(self, call) { if (call && (_typeof(call) === "object" || typeof call === "function")) { return call; } return _assertThisInitialized(self); }
+function _possibleConstructorReturn(self, call) { if (call && (_typeof(call) === "object" || typeof call === "function")) { return call; } else if (call !== void 0) { throw new TypeError("Derived constructors may only return object or undefined"); } return _assertThisInitialized(self); }
 
 function _assertThisInitialized(self) { if (self === void 0) { throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); } return self; }
 
@@ -3206,7 +3630,7 @@ var MyComponent = _decorate([(0,lit_decorators_js__WEBPACK_IMPORTED_MODULE_1__.c
       return _this;
     }
 
-    return MyComponent;
+    return _createClass(MyComponent);
   }(_LitElement);
 
   return {
