@@ -1,25 +1,24 @@
 const path = require('path');
-const TerserPlugin = require('terser-webpack-plugin');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
+const { CleanWebpackPlugin } = require('clean-webpack-plugin');
 
 module.exports = {
   entry: {
     index: path.resolve(__dirname, 'src', 'index.js'),
-    'index.min': path.resolve(__dirname, 'src', 'index.js'),
   },
   plugins: [
     new HtmlWebpackPlugin({
       filename: 'index.html',
       template: 'index.html',
     }),
+    new CleanWebpackPlugin(),
   ],
   optimization: {
     minimize: true,
-    minimizer: [new TerserPlugin({ test: /\.min\.js$/ })],
   },
   output: {
     path: path.resolve(__dirname, 'dist'),
-    filename: '[name].js',
+    filename: '[name].[contenthash].js',
   },
   module: {
     rules: [
